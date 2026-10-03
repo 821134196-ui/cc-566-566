@@ -13,3 +13,12 @@ build/
 轨迹/
 录屏/
 视频/
+
+# 本项目运行产物
+backend/.pydeps/
+data/
+.pytest_cache/
+*.db
+*.db-journal
+backend/app/**/*.pyc
+backend/.pytest_cache/

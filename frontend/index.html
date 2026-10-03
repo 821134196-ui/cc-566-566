@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>城市道路积雪撒盐与路段复核系统</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+<div id="app">
+
+  <!-- ================= 登录 ================= -->
+  <div v-if="!isLogin" class="login-wrap">
+    <div class="login-card">
+      <div class="brand-row">
+        <div class="brand-logo">❄️</div>
+        <div>
+          <h1>道路积雪撒盐与复核系统</h1>
+          <div class="sub">清雪调度 · 作业回传 · 路段复核 · 进度一张图</div>
+        </div>
+      </div>
+      <div class="field">
+        <label>演示账号（点击快速填充）</label>
+        <select v-model="quickUser">
+          <option value="">— 选择账号 —</option>
+          <option value="manager">张管理（管理人员，看进度）</option>
+          <option value="dispatcher">刁调度（调度员，派车）</option>
+          <option value="li">李作业（作业人员，X101 撒盐车）</option>
+          <option value="chen">陈兼岗（作业 + 复核双身份，验证回避）</option>
+          <option value="reviewer">王复核（复核员）</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>用户名</label>
+        <input v-model="quickUser" type="text" placeholder="如 dispatcher" @keyup.enter="doLogin(quickUser)" />
+      </div>
+      <div class="field">
+        <label>密码</label>
+        <input v-model="loginPassword" type="password" placeholder="123456" @keyup.enter="doLogin(quickUser)" />
+      </div>
+      <div class="error-msg">{{ loginError }}</div>
+      <button class="btn btn-primary btn-block" @click="doLogin(quickUser)">登 录</button>
+      <div class="hint">
+        所有演示账号密码均为 <code>123456</code><br/>
+        推荐流程：刁调度派车 → 李作业回传并申请复核 → 王复核开放路段
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 主界面 ================= -->
+  <div v-else class="app-shell">
+    <!-- 顶栏 -->
+    <div class="topbar">
+      <span style="font-size:20px">❄️</span>
+      <span class="title">城市道路积雪撒盐与路段复核系统</span>
+      <span class="spacer"></span>
+      <span class="live-dot"></span>
+      <span class="clock">车辆位置模拟刷新中 · {{ now }}</span>
+      <div class="user-chip">
+        <div class="avatar">{{ user.name[0] }}</div>
+        <div>
+          <div>{{ user.name }}</div>
+          <div class="role-badges">
+            <span v-for="r in user.roles" :key="r" class="role-badge">{{ roleLabel(r) }}</span>
+          </div>
+        </div>
+      </div>
+      <button class="btn btn-sm btn-ghost" style="background:rgba(255,255,255,.14);color:#fff;border-color:transparent" @click="doLogout">退出</button>
+    </div>
+
+    <div class="main">
+      <!-- ---------- 左侧工作台 ---------- -->
+      <div class="sidebar">
+        <div class="tabs">
+          <div v-for="t in visibleTabs" :key="t.key"
+               class="tab" :class="{active: activeTab===t.key}"
+               @click="switchTab(t.key)">
+            <span class="ico">{{ t.icon }}</span>{{ t.label }}
+          </div>
+        </div>
+
+        <div class="side-body">
+          <div v-if="flash.type==='error'" class="alert alert-error">{{ flash.text }}</div>
+          <div v-if="flash.type==='ok'" class="alert alert-ok">{{ flash.text }}</div>
+
+          <!-- 路段进度（所有角色可见） -->
+          <div v-if="activeTab==='segments'">
+            <div class="section-title">路段处理进度（{{ filteredSegments.length }}）</div>
+            <div class="meta" style="margin-bottom:10px">
+              <span class="tag clickable" :class="{'st-untreated':true}" style="cursor:pointer;opacity: filterStatus==='all'?1:.6" @click="filterStatus='all'">全部 {{ stats.total }}</span>
+              <span class="tag st-untreated" style="cursor:pointer" @click="filterStatus='untreated'">未清理 {{ stats.untreated }}</span>
+              <span class="tag st-salted" style="cursor:pointer" @click="filterStatus='salted'">已撒盐 {{ stats.salted }}</span>
+              <span class="tag st-in_review" style="cursor:pointer" @click="filterStatus='in_review'">待复核 {{ stats.in_review }}</span>
+              <span class="tag st-open" style="cursor:pointer" @click="filterStatus='open'">已开放 {{ stats.open }}</span>
+            </div>
+            <div v-if="!filteredSegments.length" class="empty">当前筛选下暂无路段</div>
+            <div v-for="s in filteredSegments" :key="s.id"
+                 class="card clickable" :class="{selected: selectedId===s.id}"
+                 @click="selectSegment(s.id)">
+              <div class="line1">
+                <span class="tag" :class="'lvl-'+s.road_level">{{ s.road_level_name.slice(0,2) }}</span>
+                {{ s.name }}
+                <span class="spacer" style="flex:1"></span>
+                <span class="tag" :class="'st-'+s.status">{{ s.status_name }}</span>
+              </div>
+              <div class="line2">
+                编号 {{ s.code }} · 长 {{ s.length_km }}km · 累计融雪剂 {{ fmtNum(s.salt_total_kg) }}kg
+              </div>
+            </div>
+          </div>
+
+          <!-- 派车调度 -->
+          <div v-if="activeTab==='dispatch'">
+            <div class="section-title">按道路等级派车</div>
+            <div class="card">
+              <div class="form-row">
+                <label>选择路段</label>
+                <select v-model="dispatchForm.segment_id" @change="onDispatchSegmentChange">
+                  <option v-for="s in segments" :key="s.id" :value="s.id"
+                          :disabled="s.status==='open' || s.status==='in_review'">
+                    {{ s.name }}（{{ s.road_level_name }}）— {{ s.status_name }}
+                  </option>
+                </select>
+              </div>
+              <div class="form-row">
+                <label>车辆（只能派能力不低于道路等级的车）</label>
+                <select v-model="dispatchForm.vehicle_id">
+                  <option v-for="v in eligibleVehicles(dispatchForm.segment_id)" :key="v.id" :value="v.id">
+                    {{ v.plate }} · 可承担 {{ v.min_level }} 级及以下 · {{ vehStatusLabel(v.status) }} · 作业员 {{ v.operator_name || '未绑定' }}
+                  </option>
+                </select>
+                <div v-if="!eligibleVehicles(dispatchForm.segment_id).length" class="alert alert-error" style="margin-top:8px">
+                  没有可承担该道路等级且未故障的车辆
+                </div>
+              </div>
+              <div class="form-row">
+                <label>计划融雪剂用量（kg）</label>
+                <input v-model.number="dispatchForm.salt_planned_kg" type="number" min="0" />
+              </div>
+              <div class="form-row">
+                <label>备注</label>
+                <input v-model="dispatchForm.note" type="text" placeholder="如：早高峰前完成" />
+              </div>
+              <button class="btn btn-primary btn-block" @click="submitDispatch">派 车</button>
+            </div>
+
+            <div class="section-title">车辆状态</div>
+            <div v-for="v in vehicles" :key="v.id" class="card"
+                 :class="{clickable:true, selected: false}" style="cursor:default">
+              <div class="line1">🚚 {{ v.plate }}
+                <span style="flex:1"></span>
+                <span class="tag" :class="'v-'+v.status">{{ vehStatusLabel(v.status) }}</span>
+              </div>
+              <div class="line2">
+                载重 {{ fmtNum(v.capacity_kg) }}kg · 可承担 {{ v.min_level }} 级及以下道路 · 作业员 {{ v.operator_name || '未绑定' }}
+              </div>
+            </div>
+          </div>
+
+          <!-- 车辆作业 -->
+          <div v-if="activeTab==='work'">
+            <div class="section-title">我的派车单（{{ myDispatches.length }}）</div>
+            <div v-if="!myDispatches.length" class="empty">当前没有分配给您车辆的进行中派车单</div>
+
+            <div v-for="d in myDispatches" :key="d.id" class="card">
+              <div class="line1">
+                派车单 #{{ d.id }} · {{ segById(d.segment_id)?.name }}
+                <span style="flex:1"></span>
+                <span class="tag" :class="d.status==='interrupted' ? 'v-broken' : 'v-working'">
+                  {{ d.status==='interrupted' ? '故障中断' : '作业中' }}
+                </span>
+              </div>
+              <div class="line2">
+                车辆 {{ d.vehicle_plate }} · 已回传 {{ d.records.length }} 次
+                · 本单 {{ fmtNum(d.records.reduce((a,r)=>a+r.salt_kg,0)) }}kg
+                · 计划 {{ fmtNum(d.salt_planned_kg) }}kg
+              </div>
+
+              <!-- 故障中断提示 -->
+              <div v-for="b in d.breakdowns" :key="b.id" style="margin-top:8px">
+                <div class="alert" :class="b.status==='interrupted' ? 'alert-error' : 'alert-info'">
+                  <b>{{ b.status==='interrupted' ? '⛔ 故障中断中' : '✔ 故障已处理' }}</b><br/>
+                  {{ b.reason }}<br/>后续安排：{{ b.follow_up }}
+                  <div v-if="b.status==='interrupted'" style="margin-top:7px">
+                    <input v-model="resolving[b.id]" type="text" placeholder="填写处理结果，如：已换件修复"
+                           style="width:100%;padding:7px 9px;border:1px solid var(--line);border-radius:7px" />
+                    <button class="btn btn-sm btn-primary" style="margin-top:6px"
+                            @click="resolveBreakdown(d.id, b.id)">记录处理结果并恢复作业</button>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 作业回传表单 -->
+              <div style="margin-top:8px">
+                <div class="form-row">
+                  <label>本次融雪剂用量（kg）</label>
+                  <input v-model.number="workForm(d.id).salt_kg" type="number" min="0" step="10" />
+                </div>
+                <div class="form-row">
+                  <label>作业定位（归一化坐标 0~1）</label>
+                  <div style="display:flex;gap:6px">
+                    <input v-model="workForm(d.id).pos_x" type="number" min="0" max="1" step="0.01" placeholder="x" />
+                    <input v-model="workForm(d.id).pos_y" type="number" min="0" max="1" step="0.01" placeholder="y" />
+                    <button class="btn btn-ghost btn-sm" type="button" @click="useGpsPosition(d.id)">📍定位</button>
+                  </div>
+                </div>
+                <div class="form-row">
+                  <label>现场照片（保存本地，可选）</label>
+                  <input type="file" accept="image/*" @change="onPhotoPicked($event, d.id)" />
+                  <div v-if="workForm(d.id).photoName" style="font-size:12px;color:var(--ink-2);margin-top:3px">
+                    已选择：{{ workForm(d.id).photoName }}
+                  </div>
+                </div>
+                <div class="btn-row">
+                  <button class="btn btn-primary btn-sm" @click="uploadWork(d.id)">回传作业</button>
+                  <button class="btn btn-ghost btn-sm" :disabled="!lastSubmit[d.id]"
+                          title="原样重放上一次的作业回传，验证系统不会重复计盐量"
+                          @click="uploadWork(d.id, {duplicate:true})">模拟重复回传</button>
+                  <button class="btn btn-ghost btn-sm"
+                          @click="showBreakdownFor[d.id]=!showBreakdownFor[d.id]">车辆故障</button>
+                </div>
+                <div v-if="showBreakdownFor[d.id]" style="margin-top:8px;border-top:1px dashed var(--line);padding-top:8px">
+                  <div class="form-row">
+                    <label>故障情况</label>
+                    <textarea v-model="bdForm(d.id).reason" placeholder="如：撒布机卡滞无法出料"></textarea>
+                  </div>
+                  <div class="form-row">
+                    <label>后续安排</label>
+                    <textarea v-model="bdForm(d.id).follow_up" placeholder="如：30分钟内维修，同时调度备用车 X102"></textarea>
+                  </div>
+                  <button class="btn btn-danger btn-sm" @click="reportBreakdown(d.id)">确认故障并中断作业</button>
+                </div>
+                <div class="btn-row" style="margin-top:10px">
+                  <button class="btn btn-sm" style="background:#16a34a;color:#fff"
+                          :disabled="d.status!=='active'"
+                          @click="completeDispatch(d.id)">撒盐完成 · 申请复核</button>
+                  <button class="btn btn-ghost btn-sm" @click="selectSegment(d.segment_id)">查看路段</button>
+                </div>
+              </div>
+
+              <!-- 最近作业记录 -->
+              <div v-if="d.records.length" class="record-list" style="margin-top:10px">
+                <div v-for="r in d.records.slice().reverse().slice(0,3)" :key="r.id" class="rec">
+                  <img v-if="r.photo_url" :src="photoUrl(r.photo_url)" @click="photoPreview=photoUrl(r.photo_url)" />
+                  <div v-else style="width:58px;height:44px;border-radius:6px;background:#f1f5f9;display:grid;place-items:center;font-size:18px">🧂</div>
+                  <div class="rec-main">
+                    <b>#{{ r.id }}</b> {{ r.salt_kg }}kg · {{ r.operator_name }}<br/>
+                    {{ fmtTime(r.worked_at) }}<br/>定位 ({{ r.pos_x }}, {{ r.pos_y }})
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 路段复核 -->
+          <div v-if="activeTab==='review'">
+            <div class="section-title">待复核路段（{{ reviewSegments.length }}）</div>
+            <div v-if="!reviewSegments.length" class="empty">暂无待复核路段</div>
+            <div v-for="s in reviewSegments" :key="s.id" class="card clickable" @click="selectSegment(s.id)">
+              <div class="line1">
+                {{ s.name }}
+                <span style="flex:1"></span>
+                <span class="tag st-in_review">待复核</span>
+              </div>
+              <div class="line2">
+                {{ s.code }} · 累计撒盐 {{ fmtNum(s.salt_total_kg) }}kg · 点击查看照片与作业记录并出具结论
+              </div>
+            </div>
+            <div class="alert alert-info" style="margin-top:6px">
+              规则：只有复核员能开放路段；在该路段作业过的人员不能签发本路段结论；
+              未复核通过前，路段始终不会开放。
+            </div>
+          </div>
+        </div>
+
+        <div class="side-foot">
+          <span>SQLite 本地库 · 模拟地图与定位</span>
+          <span>共 {{ stats.total }} 路段 · 开放率 {{ stats.openPct }}%</span>
+        </div>
+      </div>
+
+      <!-- ---------- 中间地图 ---------- -->
+      <div class="map-col">
+        <div class="map-card">
+          <svg class="map-svg" viewBox="0 0 100 100" preserveAspectRatio="none">
+            <defs>
+              <pattern id="grid" width="10" height="10" patternUnits="userSpaceOnUse">
+                <path d="M 10 0 L 0 0 0 10" fill="none" stroke="#dbe4f0" stroke-width="0.25"/>
+              </pattern>
+            </defs>
+            <rect width="100" height="100" fill="url(#grid)"/>
+            <!-- 装饰：河流 -->
+            <path d="M 0,82 C 20,78 30,92 48,86 S 78,74 100,80" fill="none"
+                  stroke="#93c5fd" stroke-width="3.2" opacity="0.55" stroke-linecap="round"/>
+
+            <!-- 路基 + 状态层 + 点击热区 -->
+            <g v-for="s in segments" :key="'road'+s.id">
+              <polyline class="road-base" :points="segPoints(s)"/>
+              <polyline class="road-status" :class="['s-'+s.status, {selected: selectedId===s.id}]"
+                        :points="segPoints(s)" vector-effect="non-scaling-stroke"/>
+              <polyline class="road-hit" :points="segPoints(s)" @click="selectSegment(s.id)"/>
+            </g>
+          </svg>
+
+          <!-- 路名标签（HTML 覆盖，避免 SVG 拉伸文字） -->
+          <div v-for="s in segments" :key="'lbl'+s.id" class="road-html-label"
+               :style="{left: labelPos(s).x+'%', top: labelPos(s).y+'%'}"
+               @click="selectSegment(s.id)">
+            <span class="tag" :class="'st-'+s.status" style="cursor:pointer">{{ s.code }} {{ s.name }}</span>
+          </div>
+
+          <!-- 车辆实时位置（模拟） -->
+          <div v-for="p in positions" :key="'pos'+p.vehicle_id"
+               class="vehicle-dot" :class="{'v-broken': p.status==='broken', 'v-working': p.status==='working'}"
+               :style="{left: p.x*100+'%', top: p.y*100+'%'}"
+               :title="p.plate + ' · ' + vehStatusLabel(p.status)">
+            <span class="v-ring" v-if="p.status==='working'"></span>
+            <span class="v-emoji">{{ p.status==='broken' ? '🚧' : '🚛' }}</span>
+            <span class="v-plate">{{ p.plate.replace('·','') }}</span>
+          </div>
+
+          <!-- 图例 -->
+          <div class="legend">
+            <div><b style="font-size:12.5px">路段状态</b></div>
+            <div class="row"><span class="swatch" style="background:var(--untreated);background-image:repeating-linear-gradient(90deg,var(--untreated) 0 3px,transparent 3px 7px)"></span>未清理</div>
+            <div class="row"><span class="swatch" style="background:var(--salted)"></span>已撒盐 / 待补盐</div>
+            <div class="row"><span class="swatch" style="background:var(--review)"></span>待复核</div>
+            <div class="row"><span class="swatch" style="background:var(--open)"></span>已开放（可通行）</div>
+            <div style="margin-top:6px"><b style="font-size:12.5px">车辆</b></div>
+            <div class="row"><span>🚛</span>待命 / 作业中（蓝圈）</div>
+            <div class="row"><span>🚧</span>故障中断</div>
+          </div>
+
+          <!-- 统计 -->
+          <div class="map-stats">
+            <div class="stat-pill"><span class="dot-lg" style="background:var(--untreated)"></span>未清理 <b>{{ stats.untreated }}</b></div>
+            <div class="stat-pill"><span class="dot-lg" style="background:var(--salted)"></span>已撒盐 <b>{{ stats.salted }}</b></div>
+            <div class="stat-pill"><span class="dot-lg" style="background:var(--review)"></span>待复核 <b>{{ stats.in_review }}</b></div>
+            <div class="stat-pill"><span class="dot-lg" style="background:var(--open)"></span>已开放 <b>{{ stats.open }}</b></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ---------- 右侧详情抽屉 ---------- -->
+      <div class="detail-col" :class="{open: selectedId}">
+        <div v-if="loading" class="empty">加载中…</div>
+        <template v-else-if="detail">
+          <div class="detail-head">
+            <div>
+              <h2>{{ detail.name }}</h2>
+              <div class="line2" style="color:var(--ink-2);font-size:12.5px;margin-top:3px">
+                {{ detail.code }} · {{ detail.road_level_name }} · {{ detail.length_km }}km
+              </div>
+            </div>
+            <button class="btn btn-sm btn-ghost" @click="closeDetail">✕</button>
+          </div>
+
+          <div class="meta" style="margin:10px 0">
+            <span class="tag" :class="'st-'+detail.status">{{ detail.status_name }}</span>
+            <span class="tag">累计融雪剂 {{ fmtNum(detail.salt_total_kg) }}kg</span>
+            <span v-if="detail.opened_at" class="tag st-open">开放于 {{ fmtTime(detail.opened_at) }}</span>
+          </div>
+
+          <!-- 复核操作区 -->
+          <div v-if="perms.can_review && detail.status==='in_review'">
+            <div class="section-title">出具复核结论</div>
+            <div v-if="workedByMe(detail.id)" class="alert alert-error">
+              您在该路段上传过作业记录，依据职责分离要求，不能签发本路段的开放结论。
+            </div>
+            <div class="card" style="background:var(--panel-2)">
+              <label class="check-row">
+                <input type="checkbox" v-model="reviewForm(detail.id).snow_cleared" />
+                积雪已清除，无明显积雪/冰板
+              </label>
+              <label class="check-row">
+                <input type="checkbox" v-model="reviewForm(detail.id).surface_safe" />
+                路面无结冰、不湿滑，达到通行条件
+              </label>
+              <div class="form-row" style="margin-top:6px">
+                <label>复核意见</label>
+                <textarea v-model="reviewForm(detail.id).note" placeholder="现场核查情况说明"></textarea>
+              </div>
+              <button class="btn btn-primary btn-block"
+                      @click="submitReview(detail.id)">
+                {{ reviewForm(detail.id).snow_cleared && reviewForm(detail.id).surface_safe ? '确认达标 · 开放路段' : '不达标 · 驳回补盐' }}
+              </button>
+            </div>
+          </div>
+
+          <!-- 派车与作业历史 -->
+          <div class="section-title">派车与作业记录（{{ detail.dispatches.length }} 张派车单）</div>
+          <div v-if="!detail.dispatches.length" class="empty">尚未派车</div>
+          <div v-for="d in detail.dispatches" :key="d.id" class="card">
+            <div class="line1" style="font-size:13.5px">
+              派车单 #{{ d.id }} · {{ d.vehicle_plate }}
+              <span style="flex:1"></span>
+              <span class="tag" :class="d.status==='completed' ? 'st-in_review' : (d.status==='interrupted' ? 'v-broken' : 'v-working')">
+                {{ dStatusLabel(d.status) }}
+              </span>
+            </div>
+            <div class="line2">
+              调度 {{ d.dispatcher_name }} · 计划 {{ fmtNum(d.salt_planned_kg) }}kg · {{ fmtTime(d.created_at) }}
+            </div>
+
+            <div v-for="b in d.breakdowns" :key="b.id" class="alert"
+                 :class="b.status==='interrupted' ? 'alert-error' : 'alert-info'"
+                 style="margin-top:7px;font-size:12.5px">
+              <b>{{ b.status==='interrupted' ? '⛔ 故障中断' : '✔ 故障已处理' }}</b>
+              （{{ fmtTime(b.occurred_at) }}）<br/>
+              原因：{{ b.reason }}<br/>后续安排：{{ b.follow_up }}
+            </div>
+
+            <div v-if="d.records.length" class="record-list" style="margin-top:8px">
+              <div v-for="r in d.records" :key="r.id" class="rec">
+                <img v-if="r.photo_url" :src="photoUrl(r.photo_url)" @click="photoPreview=photoUrl(r.photo_url)" />
+                <div v-else style="width:58px;height:44px;border-radius:6px;background:#f1f5f9;display:grid;place-items:center;font-size:18px">🧂</div>
+                <div class="rec-main">
+                  <b>#{{ r.id }}</b> {{ r.salt_kg }}kg · {{ r.operator_name }}
+                  <span v-if="r.duplicate" class="dup-flag">重复回传</span><br/>
+                  {{ fmtTime(r.worked_at) }}<br/>定位 ({{ r.pos_x }}, {{ r.pos_y }})
+                </div>
+              </div>
+            </div>
+            <div v-else class="line2" style="margin-top:5px">暂无作业回传</div>
+          </div>
+
+          <!-- 复核历史 -->
+          <div class="section-title">复核记录（{{ detail.reviews.length }}）</div>
+          <div v-if="!detail.reviews.length" class="empty">暂无复核记录</div>
+          <div v-for="r in detail.reviews" :key="r.id" class="card">
+            <div class="line1" style="font-size:13.5px">
+              {{ r.reviewer_name }}
+              <span style="flex:1"></span>
+              <span class="tag" :class="r.passed ? 'st-open' : 'v-broken'">
+                {{ r.passed ? '通过 · 已开放' : '驳回 · 需补盐' }}
+              </span>
+            </div>
+            <div class="line2">
+              积雪 {{ r.snow_cleared ? '达标' : '不达标' }} · 路面 {{ r.surface_safe ? '达标' : '不达标' }}
+              · {{ fmtTime(r.reviewed_at) }}
+              <br v-if="r.note" />{{ r.note }}
+            </div>
+          </div>
+
+          <!-- 时间线 -->
+          <div class="section-title">状态轨迹（可追查）</div>
+          <div class="timeline">
+            <div v-for="e in timeline" :key="e.id" :class="tlClass(e.entity_type)">
+              <div class="tl-action">{{ actionLabel(e.action) }}</div>
+              <div class="tl-detail">
+                {{ e.detail }}
+                <span v-if="tlTransition(e)" style="color:#7c3aed">［{{ tlTransition(e) }}］</span>
+              </div>
+              <div class="tl-meta">{{ entityLabel(e.entity_type) }} #{{ e.entity_id }} · {{ e.actor_name }} · {{ fmtTime(e.created_at) }}</div>
+            </div>
+            <div v-if="!timeline.length" class="empty">暂无轨迹</div>
+          </div>
+        </template>
+      </div>
+    </div>
+  </div>
+
+  <!-- 照片大图 -->
+  <div v-if="photoPreview" class="modal-mask" @click="photoPreview=null">
+    <img :src="photoPreview" alt="现场照片" />
+  </div>
+</div>
+<script src="/static/vendor/vue.global.prod.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
